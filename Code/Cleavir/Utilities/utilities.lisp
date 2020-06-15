@@ -1,6 +1,6 @@
 (cl:in-package #:cleavir-utilities)
 
-(defun depth-first-search-preorder (start-node successor-fun)
+(defun depth-first-search-reverse-post-order (start-node successor-fun)
   (let ((table (make-hash-table :test #'eq))
 	(result '()))
     (labels ((traverse (node)
@@ -13,7 +13,7 @@
     result))
 
 (defun depth-first-search-postorder (start-node successor-fun)
-  (nreverse (depth-first-search-preorder start-node successor-fun)))
+  (nreverse (depth-first-search-reverse-post-order start-node successor-fun)))
 
 (defun count-nodes (start-node successor-fun)
   (let ((table (make-hash-table :test #'eq)))
