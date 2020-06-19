@@ -24,49 +24,47 @@
 
 (in-package #:cleavir-hir-transformations)
 
-;;; VALUE NUMBERING
 
-;; Need a fresh object for the value numbering table. The actual
-;; number is an internal number to help tell when to end the fixpoint
-;; iteration in loops.
-(defclass value-number ()
-  ((%number :accessor %number :initarg :number)))
+;; Basically, we keep a constraint table like we did with the value numbering tables.
 
-(defclass phi-number (value-number) ())
+(defclass augmented-basic-block (cleavir-basic-blocks:basic-block)
+  ;; Will this block actually get executed?
+  ((%executablep :accessor executablep :initarg :executablep)
+   ;; Congruence classes of eq data represented by a value numbering
+   ;; data structure.
+   (%in-eq-data :accessor in-eq-data :initarg :in-eq-data)
+   (%out-eq-data :accessor out-eq-data :initarg :out-eq-data)
+   ;; For all incoming constraints.
+   (%in-constraints :accessor in-constraints :initarg :in-constraints)
+   ;; From out constraints coming from stuff like THE.
 
-(defun %value-number= (x y)
-  (if (and (typep x 'value-number)
-           (typep y 'value-number))
-      (= (%number x) (%number y))
-      (eql x y)))
+   ;; Right now basically always a copy of IN but will soon change.
+   (%out-constraints :accessor out-constraints :initarg :out-constraints)
+   ;; Used for asserting complementary constraints.
+   (%branch-constraint :accessor branch-constraint :initarg :branch-constraint :initform nil)))
+
+;;; "VALUE NUMBERING"
+
+;; Need a fresh object for the value numbering table.
+(defclass value-number () ())
+;; Why do we need a phi value number? It is required for us to
+;; fixpoint in DAGs like A -> B; B -> B; B -> C; C -> B.
+(defclass phi-value-number (value-number) ())
 
 (defclass value-number-table ()
-  ((%table :accessor table :initarg :table)
-   (%plain :accessor value-fill :initarg :value-fill)
-   (%phi :accessor phi-fill :initarg :phi-fill)))
+  ((%table :accessor table :initarg :table)))
 
-(defun make-value-number-table (&key (value-fill 1) (phi-fill -1))
-  (make-instance 'value-number-table
-                 :table (make-hash-table
-                         :test #'eq
-                         ;; Only approximation to the hash table
-                         ;; size. Could use an actual count too.
-                         :size (+ (- phi-fill) value-fill))
-                 :value-fill value-fill
-                 :phi-fill phi-fill))
+(defun make-value-number-table ()
+  (make-instance 'value-number-table :table (make-hash-table)))
 
-(defun allocate-value-number (table)
-  (prog1 (make-instance 'value-number :number (value-fill table))
-    (incf (value-fill table))))
+(defun make-value-number () (make-instance 'value-number))
+(defun make-phi-value-number () (make-instance 'phi-value-number))
 
-(defun allocate-phi-number (table)
-  (prog1 (make-instance 'phi-number :number (phi-fill table))
-    (decf (phi-fill table))))
-
-(defun compute-block-in-eq-data (block predecessors)
+(defun compute-block-in-eq-data (block predecessors initial-pass-p)
   (cond ((null predecessors)
-         (assert (typep (cleavir-basic-blocks:first-instruction block)
-                        'cleavir-ir:enter-instruction))
+         (assert (and (typep (cleavir-basic-blocks:first-instruction block)
+                             'cleavir-ir:enter-instruction)
+                      initial-pass-p))
          (setf (in-eq-data block) (make-value-number-table)))
         ((null (rest predecessors))
          ;; Can share the same value number table in this case because
@@ -80,15 +78,11 @@
                   (remove-if (lambda (table)
                                (zerop (hash-table-count table)))
                              pred-tables :key #'table))
-                ;; Initialize the fills so that the internal numbers
-                ;; don't change when the value numbers stabilize.
-                (value-table (make-value-number-table
-                              :value-fill
-                              (loop for init-table in initialized-tables
-                                    minimize (value-fill init-table))
-                              :phi-fill
-                              (loop for init-table in initialized-tables
-                                    maximize (phi-fill init-table)))))
+                (value-table (if initial-pass-p
+                                 (make-value-number-table)
+                                 (in-eq-data block))))
+           (when (not initial-pass-p)
+             (assert (equal initialized-tables pred-tables)))
            (maphash (lambda (datum number)
                       (let ((all-same t)
                             (overdefined nil))
@@ -98,7 +92,7 @@
                             ;; different, then the value is
                             ;; overdefined.
                             (when other-number
-                              (unless (%value-number= number other-number)
+                              (unless (eq number other-number)
                                 (setf all-same nil)
                                 (setf overdefined t)
                                 (return)))))
@@ -106,15 +100,34 @@
                           (setf (gethash datum (table value-table))
                                 number))
                         (when overdefined
-                          (setf (gethash datum (table value-table))
-                                (allocate-phi-number value-table)))))
-                    (table (first initialized-tables)))
-           (setf (in-eq-data block) value-table))))
-  (in-eq-data block))
+                          (if initial-pass-p
+                              (setf (gethash datum (table value-table))
+                                    (make-value-number))
+                              ;; Only allocate a new phi value number
+                              ;; during reanalysis if it has not been
+                              ;; reanalyzed as such yet to prevent
+                              ;; infinite loops.
 
+                              ;; Why does this work?
+
+                              ;; In the initial reanalysis pass, all
+                              ;; predecessor value tables are already
+                              ;; initialized. Therefore, we are
+                              ;; guaranteed to get a fresh congruency
+                              ;; class distinct from all the
+                              ;; predecessors. As flow propagation
+                              ;; goes around and reinitializes all the
+                              ;; predecessors, the true congruency
+                              ;; class will stabilize the second time
+                              ;; around.
+                              (unless (typep (gethash datum (table value-table)) 'phi-value-number)
+                                (setf (gethash datum (table value-table))
+                                      (make-phi-value-number)))))))
+                    (table (first initialized-tables)))
+           (setf (in-eq-data block) value-table)))))
 
 ;;; Transfer in data to out data. Return whether it feels like something has changed.
-(defun block-value-transfer (block)
+(defun block-value-transfer (block initial-pass-p)
   (let* ((in-eq-data (in-eq-data block))
          (in-table (table in-eq-data))
          ;; Need a temporary table to accumulate the effects of
@@ -123,13 +136,6 @@
          (out-eq-data (out-eq-data block))
          (out-table (table out-eq-data))
          (changed nil))
-
-    ;; Make space in the out table for all existing data value
-    ;; associations.
-    (setf (value-fill out-eq-data)
-          (value-fill in-eq-data)
-          (phi-fill out-eq-data)
-          (phi-fill in-eq-data))
     (cleavir-basic-blocks:map-basic-block-instructions
      (lambda (instruction)
        (typecase instruction
@@ -148,7 +154,6 @@
                                     ;; lexical location, use it
                                     ;; literally.
                                     input))))
-            (setf (gethash input temp-table) input-number)
             (setf (gethash output temp-table) input-number)))
          (t
           ;; This is where having known functions would plug into
@@ -160,7 +165,13 @@
           ;; instructions as totally opaque.
           (dolist (output (cleavir-ir:outputs instruction))
             (setf (gethash output temp-table)
-                  (allocate-value-number out-eq-data))))))
+                  (if initial-pass-p
+                      (make-value-number)
+                      ;; Reuse an existing number. It will get
+                      ;; overwritten with the right stuff if it's bad.
+                      (progn
+                        (assert (gethash output out-table))
+                        (gethash output out-table))))))))
      block)
     ;; Commit the existing or new value numbers of existing data
     ;; to the out table.
@@ -168,18 +179,21 @@
                (let* ((temp-number (gethash datum temp-table))
                       (out-number (gethash datum out-table))
                       (new-out-number (or temp-number in-number)))
-                 (unless (%value-number= out-number new-out-number)
+                 (unless (eq out-number new-out-number)
                    (setf (gethash datum out-table) new-out-number)
                    (setf changed t))))
              in-table)
-    ;; Inform the out table of the value numbers of new
-    ;; data. Should really only happen in the initial reverse
-    ;; post-order pass.
-    (maphash (lambda (datum temp-number)
-               (let ((out-number (gethash datum out-table)))
-                 (unless (%value-number= out-number temp-number)
-                   (setf (gethash datum out-table) temp-number))))
-             temp-table)
+    ;; Inform the out table of the value numbers of new data. Should
+    ;; really only happen in the initial reverse post-order
+    ;; pass... maybe? This is because any new value appearing block
+    ;; locally won't need to be reanalyzed pretty sure.
+    (when initial-pass-p
+      (maphash (lambda (datum temp-number)
+                 (let ((out-number (gethash datum out-table)))
+                   (unless (eq out-number temp-number)
+                     (setf (gethash datum out-table) temp-number)
+                     (setf changed t))))
+               temp-table))
     changed))
 
 (defun value-number (start)
@@ -193,8 +207,8 @@
       (when (null initial-ordering)
         (return))
       (let ((block (pop initial-ordering)))
-        (compute-block-in-eq-data block (cleavir-basic-blocks:predecessors block))
-        (block-value-transfer block)
+        (compute-block-in-eq-data block (cleavir-basic-blocks:predecessors block) t)
+        (block-value-transfer block t)
         (dolist (succ (cleavir-basic-blocks:successors block))
           ;; Backedge.
           (unless (member succ initial-ordering)
@@ -206,8 +220,8 @@
       (when (null reanalyze)
         (return))
       (let ((block (pop reanalyze)))
-        (compute-block-in-eq-data block (cleavir-basic-blocks:predecessors block))
-        (when (block-value-transfer block)
+        (compute-block-in-eq-data block (cleavir-basic-blocks:predecessors block) nil)
+        (when (block-value-transfer block nil)
           (dolist (succ (cleavir-basic-blocks:successors block))
             (pushnew succ reanalyze)))))))
 
@@ -248,24 +262,6 @@
 
 (defun single-def (location)
   (null (rest (cleavir-ir:defining-instructions location))))
-
-;; Basically, we keep a constraint table like we did with the value numbering tables.
-
-(defclass augmented-basic-block (cleavir-basic-blocks:basic-block)
-  ;; Will this block actually get executed?
-  ((%executablep :accessor executablep :initarg :executablep)
-   ;; Congruence classes of eq data represented by a value numbering
-   ;; data structure.
-   (%in-eq-data :accessor in-eq-data :initarg :in-eq-data)
-   (%out-eq-data :accessor out-eq-data :initarg :out-eq-data)
-   ;; For all incoming constraints.
-   (%in-constraints :accessor in-constraints :initarg :in-constraints)
-   ;; From out constraints coming from stuff like THE.
-
-   ;; Right now basically always a copy of IN but will soon change.
-   (%out-constraints :accessor out-constraints :initarg :out-constraints)
-   ;; Used for asserting complementary constraints.
-   (%branch-constraint :accessor branch-constraint :initarg :branch-constraint :initform nil)))
 
 (defgeneric constrain-branch-instruction (instruction block))
 
