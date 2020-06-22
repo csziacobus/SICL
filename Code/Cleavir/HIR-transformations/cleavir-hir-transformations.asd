@@ -20,7 +20,7 @@
    (:file "segregate-lexicals")
    (:file "escape")
    (:file "copy-propagate")
-   (:file "constraint")
+   (:file "value-type-infer")
    (:file "multiple-values-eliminate")
    (:file "eliminate-superfluous-temporaries")
    (:file "hir-transformations")))

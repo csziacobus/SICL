@@ -1,5 +1,5 @@
 ;;;; Do value numbering, and constrain properties of value numbers
-;;;; with constraints.  Everything is basic block granularity for
+;;;; with type constraints.  Everything is basic block granularity for
 ;;;; speed and space efficiency, meaning there may be some loss of
 ;;;; precision for local assignments within basic blocks. However, I
 ;;;; think it is pretty much not worth the trouble since loss of
@@ -7,15 +7,11 @@
 ;;;; defining instruction with some sort of block local type
 ;;;; instruction.
 
-;;;; Grab bag of analyses: type analysis, interval analysis, and
-;;;; constant analysis
-
-;;;; Grab bag of transformations available after this stage: function
-;;;; folding, function flushing, constant prop, copy prop, unreachable
-;;;; branch elimination.
-
-;;; maybe a persistent hash table implementation would cut down memory
-;;; size.
+;;;; The "value numbering" prepass analysis used here is designed to
+;;;; make the actual type analysis sparse, in the sense that the type
+;;;; analysis only needs to annotate value "numbers" instead of
+;;;; number/congruency class + control point tuples, which is a huge
+;;;; efficiency win, without loss of precision.
 
 ;;;; TODO actually use the executable flag to reanalyze merge points
 ;;;; for more precise type constraints.
@@ -24,12 +20,9 @@
 
 (in-package #:cleavir-hir-transformations)
 
-
-;; Basically, we keep a constraint table like we did with the value numbering tables.
-
 (defclass augmented-basic-block (cleavir-basic-blocks:basic-block)
-  ;; Will this block actually get executed?
-  ((%executablep :accessor executablep :initarg :executablep)
+  (;; Will this block actually get executed?
+   (%executablep :accessor executablep :initarg :executablep)
    ;; Congruence classes of eq data represented by a value numbering
    ;; data structure.
    (%in-eq-data :accessor in-eq-data :initarg :in-eq-data)
@@ -37,25 +30,27 @@
    ;; For all incoming constraints.
    (%in-constraints :accessor in-constraints :initarg :in-constraints)
    ;; From out constraints coming from stuff like THE.
-
    ;; Right now basically always a copy of IN but will soon change.
    (%out-constraints :accessor out-constraints :initarg :out-constraints)
    ;; Used for asserting complementary constraints.
    (%branch-constraint :accessor branch-constraint :initarg :branch-constraint :initform nil)))
 
-;;; "VALUE NUMBERING"
-
-;; Need a fresh object for the value numbering table.
+;; Need a fresh object for the value numbering table to enable sparse
+;; analysis.
 (defclass value-number () ())
 ;; Why do we need a phi value number? It is required for us to
-;; fixpoint in DAGs like A -> B; B -> B; B -> C; C -> B.
+;; fixpoint in DAGs like A -> B; B -> B; B -> C; C -> B. Essentially
+;; normal value-numbers transition to phi-value-numbers, so called
+;; since they resemble the contexts in which you see a phi, which then
+;; do not change on additional iterations of the algorithm, enabling
+;; easy fixpoint detection.
 (defclass phi-value-number (value-number) ())
 
 (defclass value-number-table ()
   ((%table :accessor table :initarg :table)))
 
-(defun make-value-number-table ()
-  (make-instance 'value-number-table :table (make-hash-table)))
+(defun make-value-number-table (&key (size 0))
+  (make-instance 'value-number-table :table (make-hash-table :size size)))
 
 (defun make-value-number () (make-instance 'value-number))
 (defun make-phi-value-number () (make-instance 'phi-value-number))
@@ -79,7 +74,10 @@
                                (zerop (hash-table-count table)))
                              pred-tables :key #'table))
                 (value-table (if initial-pass-p
-                                 (make-value-number-table)
+                                 (make-value-number-table
+                                  :size
+                                  (loop for table in initialized-tables
+                                        minimize (hash-table-count (table table))))
                                  (in-eq-data block))))
            (when (not initial-pass-p)
              (assert (equal initialized-tables pred-tables)))
@@ -130,11 +128,13 @@
 (defun block-value-transfer (block initial-pass-p)
   (let* ((in-eq-data (in-eq-data block))
          (in-table (table in-eq-data))
-         ;; Need a temporary table to accumulate the effects of
-         ;; assignments without yet committing.
-         (temp-table (make-hash-table))
          (out-eq-data (out-eq-data block))
          (out-table (table out-eq-data))
+         ;; Need a temporary table to accumulate the effects of
+         ;; assignments without yet committing.
+         (temp-table (make-hash-table :size (abs
+                                             (- (hash-table-count out-table)
+                                                (hash-table-count in-table)))))
          (changed nil))
     (cleavir-basic-blocks:map-basic-block-instructions
      (lambda (instruction)
@@ -263,16 +263,16 @@
 (defun single-def (location)
   (null (rest (cleavir-ir:defining-instructions location))))
 
-(defgeneric constrain-branch-instruction (instruction block))
+(defgeneric constrain-branch-instruction (instruction block system))
 
-(defmethod constrain-branch-instruction (instruction block))
+(defmethod constrain-branch-instruction (instruction block system))
 
-(defmethod constrain-branch-instruction ((instruction cleavir-ir:eq-instruction) block)
+(defmethod constrain-branch-instruction ((instruction cleavir-ir:eq-instruction) block system)
   ;; We really should do something with this.
   )
 
 ;;; Rethink what it means to EXECUTE.
-(defmethod constrain-branch-instruction ((instruction cleavir-ir:typeq-instruction) block)
+(defmethod constrain-branch-instruction ((instruction cleavir-ir:typeq-instruction) block system)
   (let* ((input (first (cleavir-ir:inputs instruction)))
          (input-value (gethash input (table (out-eq-data block))))
          (ctype (cleavir-ir:value-type instruction))
@@ -288,15 +288,15 @@
                        (setf (gethash input-value (table (in-constraints block)))
                              (make-typeq-constraint input-value (cleavir-ctype:top nil)))))
          (existing-ctype (type-constraint-ctype existing)))
-    (cond ((cleavir-ctype:subtypep existing-ctype ctype nil)
+    (cond ((cleavir-ctype:subtypep existing-ctype ctype system)
            (print "ALWAYS TRUE")
            ;; Always taken, so mark only the then successor as
            ;; non-executable.
            (setf (executablep else-block) nil))
           ;; XXX: Switch this to bottom-p when things are worked out
           ;; more.
-          ((cleavir-ctype:subtypep (cleavir-ctype:conjoin/2 ctype existing-ctype nil)
-                                   (cleavir-ctype:bottom nil)
+          ((cleavir-ctype:subtypep (cleavir-ctype:conjoin/2 ctype existing-ctype system)
+                                   (cleavir-ctype:bottom system)
                                    nil)
            (print "NEVER TRUE")
            ;; Never executable.
@@ -309,7 +309,7 @@
           ;; Do NOT intersect here.
           (make-typeq-constraint input-value ctype))))
 
-(defun union-constraint-into-table (constraint constraint-table)
+(defun union-constraint-into-table (constraint constraint-table system)
   (let* ((value (constraint-value constraint))
          (table (table constraint-table))
          (existing (gethash value table))
@@ -319,11 +319,10 @@
            value
            (if existing
                ;; FIXME add system arugment
-               (cleavir-ctype:disjoin/2 new (type-constraint-ctype existing) nil)
+               (cleavir-ctype:disjoin/2 new (type-constraint-ctype existing) system)
                new)))))
 
-;; This code is really bad.
-(defun compute-in-constraints (block predecessors)
+(defun compute-in-constraints (block predecessors system)
   ;; Take the out sets of the predecessors and the branch conditions
   ;; of the predecessors and merge them. Type union is our meet
   ;; operation.
@@ -356,21 +355,21 @@
              (let* ((value (constraint-value branch-constraint))
                     (existing (gethash value (table (out-constraints predecessor))))
                     (new (if negatep
-                             (cleavir-ctype:negate (type-constraint-ctype branch-constraint) nil)
+                             (cleavir-ctype:negate (type-constraint-ctype branch-constraint) system)
                              (type-constraint-ctype branch-constraint))))
                (union-constraint-into-table
                 (make-typeq-constraint
                  value
                  (if existing
-                     ;; FIXME: add system argument
-                     (cleavir-ctype:conjoin/2 new (type-constraint-ctype existing) nil)
+                     (cleavir-ctype:conjoin/2 new (type-constraint-ctype existing) system)
                      new))
-                constraint-table)))
+                constraint-table
+                system)))
            ;; Now union in the rest.
            (maphash
             (lambda (value constraint)
               (unless (eq value branch-value)
-                (union-constraint-into-table constraint constraint-table))
+                (union-constraint-into-table constraint constraint-table system))
               ;; If there is no constraint in any of the predecessors,
               ;; that is an implicit T type, so make sure to take note of
               ;; that.
@@ -378,23 +377,24 @@
                 (unless (gethash value (table (out-constraints predecessor)))
                   (union-constraint-into-table
                    (make-typeq-constraint value (cleavir-ctype:top nil))
-                   constraint-table))))
+                   constraint-table
+                   system))))
             (table (out-constraints predecessor)))))
        (setf (in-constraints block) constraint-table))))
   (in-constraints block))
 
-(defun subconstraintp (constraint1 constraint2)
+(defun subconstraintp (constraint1 constraint2 system)
   ;; ASSUMPTION type constraints are the only constraint.
   (cleavir-ctype:subtypep (type-constraint-ctype constraint1)
                           (type-constraint-ctype constraint2)
-                          nil))
+                          system))
 
-;;; THE block local portion is in charge of killing or augmenting the constraints in a block.
-
-;;; The global portion merges information from the blocks, especially at merge points.
-
-(defun constraint-propagate-analyze (start)
-  ;; Constraint propagation is a forward data-flow problem.
+;;; The block local portion is in charge of killing or augmenting the
+;;; constraints in a block.
+;;; The global portion merges information from the blocks, especially
+;;; at merge points.
+(defun analyze-types (start system)
+  ;; Type inference is a forward data-flow problem.
   (let ((worklist (cleavir-utilities::depth-first-search-reverse-post-order
                    start
                    #'cleavir-basic-blocks:successors)))
@@ -404,7 +404,8 @@
       (let* ((block (pop worklist))
              (last (cleavir-basic-blocks:last-instruction block))
              (in-constraints (compute-in-constraints block
-                                                     (cleavir-basic-blocks::predecessors block)))
+                                                     (cleavir-basic-blocks::predecessors block)
+                                                     system))
              (in-table (table in-constraints))
              (out-constraints-data (out-constraints block))
              (out-table (table out-constraints-data))
@@ -421,7 +422,7 @@
                          ;; Test if the IN constraint is narrower than
                          ;; the OUT constraint. If not, then don't
                          ;; mark changed.
-                         (setf changed (not (subconstraintp out-constraint in-constraint)))
+                         (setf changed (not (subconstraintp out-constraint in-constraint system)))
                          (progn
                            (setf (gethash value out-table) in-constraint)
                            (setf changed t)))))
@@ -433,59 +434,57 @@
         ;; Don't need to check for changed here i think because the
         ;; general maphash above does... XXX
         (when (rest (cleavir-ir:successors last))
-          (constrain-branch-instruction last block))))))
+          (constrain-branch-instruction last block system))))))
 
 ;;; The reason why we track executablep on the blocks is that
 ;;; unreachable blocks will actually make the assertion at merge points
 ;;; better, if one of the predecessor blocks is determined not
 ;;; executable.
-(defun constraint-propagate (initial-instruction)
+(defun eliminate-redundant-typeqs (initial-instruction system)
   (let* ((basic-blocks (cleavir-basic-blocks:basic-blocks initial-instruction))
-         (instruction-basic-blocks (cleavir-basic-blocks:instruction-basic-blocks basic-blocks)))
-    (let ((starting-blocks '()))
-      (dolist (block basic-blocks)
-        (change-class block 'augmented-basic-block
-                      :executablep t
-                      :out-eq-data (make-value-number-table)
-                      :out-constraints (make-constraint-table))
-        (when (typep (cleavir-basic-blocks:first-instruction block) 'cleavir-ir:enter-instruction)
-          (push block starting-blocks)))
-      (dolist (start starting-blocks)
-        (value-number start)
-        #+(or)
-        (let ((list (cleavir-utilities::depth-first-search-reverse-post-order
-                     start
-                     #'cleavir-basic-blocks:successors)))
-          (dolist (block list)
-            (print block)
-            (format t "~&in: ~a" (table (in-eq-data block)))
-            (format t "~&out: ~a" (table (out-eq-data block))))))
-      (dolist (start starting-blocks)
-        #+(or)
-        (print "DOING CONSTRAINT PROPAGATION")
-        (constraint-propagate-analyze start)
-        #+(or)
-        (let ((list (cleavir-utilities::depth-first-search-reverse-post-order
-                     start
-                     #'cleavir-basic-blocks:successors)))
-          (dolist (block list)
-            (print block)
-            (format t "~&in: ~a" (table (in-constraints block)))
-            (format t "~&out: ~a" (table (out-constraints block)))
-            (format t "~&executable: ~a" (executablep block)))))
-      (dolist (block basic-blocks)
-        (when (executablep block)
-          (let ((last (cleavir-basic-blocks:last-instruction block)))
-            (typecase last
-              (cleavir-ir:typeq-instruction
-               (let* ((succs (cleavir-ir:successors last))
-                      (then (first succs))
-                      (else (second succs)))
-                 (when (not (executablep (gethash then instruction-basic-blocks)))
-                   (format t "~& deleting typeq: ~a" (cleavir-ir:value-type last))
-                   (cleavir-ir:bypass-instruction else last))
-                 (when (not (executablep (gethash else instruction-basic-blocks)))
-                   (format t "~& deleting typeq: ~a" (cleavir-ir:value-type last))
-                   (cleavir-ir:bypass-instruction then last))))))))
-      (cleavir-ir:reinitialize-data initial-instruction)
-      (cleavir-ir:set-predecessors initial-instruction))))
+         (instruction-basic-blocks (cleavir-basic-blocks:instruction-basic-blocks basic-blocks))
+         (starting-blocks '()))
+    (dolist (block basic-blocks)
+      (change-class block 'augmented-basic-block
+                    :executablep t
+                    :out-eq-data (make-value-number-table)
+                    :out-constraints (make-constraint-table))
+      (when (typep (cleavir-basic-blocks:first-instruction block) 'cleavir-ir:enter-instruction)
+        (push block starting-blocks)))
+    (dolist (start starting-blocks)
+      (value-number start)
+      #+(or)
+      (let ((list (cleavir-utilities::depth-first-search-reverse-post-order
+                   start
+                   #'cleavir-basic-blocks:successors)))
+        (dolist (block list)
+          (print block)
+          (format t "~&in: ~a" (table (in-eq-data block)))
+          (format t "~&out: ~a" (table (out-eq-data block))))))
+    (dolist (start starting-blocks)
+      (analyze-types start system)
+      #+(or)
+      (let ((list (cleavir-utilities::depth-first-search-reverse-post-order
+                   start
+                   #'cleavir-basic-blocks:successors)))
+        (dolist (block list)
+          (print block)
+          (format t "~&in: ~a" (table (in-constraints block)))
+          (format t "~&out: ~a" (table (out-constraints block)))
+          (format t "~&executable: ~a" (executablep block)))))
+    (dolist (block basic-blocks)
+      (when (executablep block)
+        (let ((last (cleavir-basic-blocks:last-instruction block)))
+          (typecase last
+            (cleavir-ir:typeq-instruction
+             (let* ((succs (cleavir-ir:successors last))
+                    (then (first succs))
+                    (else (second succs)))
+               (when (not (executablep (gethash then instruction-basic-blocks)))
+                 (format t "~& deleting typeq: ~a" (cleavir-ir:value-type last))
+                 (cleavir-ir:bypass-instruction else last))
+               (when (not (executablep (gethash else instruction-basic-blocks)))
+                 (format t "~& deleting typeq: ~a" (cleavir-ir:value-type last))
+                 (cleavir-ir:bypass-instruction then last))))))))
+    (cleavir-ir:reinitialize-data initial-instruction)
+    (cleavir-ir:set-predecessors initial-instruction)))
