@@ -143,16 +143,19 @@
                  (output (first (cleavir-ir:outputs instruction)))
                  (input-number (or (gethash input temp-table)
                                    (gethash input in-table)
-                                   (or
-                                    ;; Assert that this inputs define
-                                    ;; does not occur after its first
-                                    ;; use in the forward flow order
-                                    ;; (pseudotopological).
-                                    (assert (not (typep input 'cleavir-ir:lexical-location)))
-                                    ;; For any location that isn't a
-                                    ;; lexical location, use it
-                                    ;; literally.
-                                    input))))
+                                   (if (typep input 'cleavir-ir:lexical-location)
+                                       ;; Assert that this inputs define does not occur after
+                                       ;; its first use in the forward flow order
+                                       ;; (pseudotopological). HIR might have some in the
+                                       ;; initial pass, but this should never happen
+                                       ;; thereafter.
+                                       (progn
+                                         (warn "Potential use before define in HIR?")
+                                         :undef)
+                                       ;; For any location that isn't a
+                                       ;; lexical location, use it
+                                       ;; literally.
+                                       input))))
             (setf (gethash output temp-table) input-number)))
          (t
           ;; This is where having known functions would plug into
