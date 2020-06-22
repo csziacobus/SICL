@@ -253,23 +253,8 @@
 (defun make-typeq-constraint (value ctype)
   (make-instance 'typep-constraint :value value :ctype ctype))
 
-;;; FIXME this is only one constraint right now.
-(defun add-constraint-to-table (constraint-table value-number constraint)
-  (setf (gethash value-number constraint-table) constraint))
-
-(defun lookup-constraint-in-table (constraint-table value-number)
-  (gethash value-number constraint-table))
-
-(defun single-def (location)
-  (null (rest (cleavir-ir:defining-instructions location))))
-
 (defgeneric constrain-branch-instruction (instruction block system))
-
 (defmethod constrain-branch-instruction (instruction block system))
-
-(defmethod constrain-branch-instruction ((instruction cleavir-ir:eq-instruction) block system)
-  ;; We really should do something with this.
-  )
 
 ;;; Rethink what it means to EXECUTE.
 (defmethod constrain-branch-instruction ((instruction cleavir-ir:typeq-instruction) block system)
