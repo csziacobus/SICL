@@ -132,9 +132,8 @@
          (out-table (table out-eq-data))
          ;; Need a temporary table to accumulate the effects of
          ;; assignments without yet committing.
-         (temp-table (make-hash-table :size (abs
-                                             (- (hash-table-count out-table)
-                                                (hash-table-count in-table)))))
+         (temp-table (make-hash-table :size (abs (- (hash-table-count out-table)
+                                                    (hash-table-count in-table)))))
          (changed nil))
     (cleavir-basic-blocks:map-basic-block-instructions
      (lambda (instruction)
@@ -198,7 +197,7 @@
 
 (defun value-number (start)
   (let* ((initial-ordering
-           (cleavir-utilities::depth-first-search-reverse-post-order
+           (cleavir-utilities:depth-first-search-reverse-postorder
             start
             #'cleavir-basic-blocks:successors))
          (reanalyze (and '() initial-ordering)))
@@ -254,7 +253,8 @@
   (make-instance 'typep-constraint :value value :ctype ctype))
 
 (defgeneric constrain-branch-instruction (instruction block system))
-(defmethod constrain-branch-instruction (instruction block system))
+(defmethod constrain-branch-instruction (instruction block system)
+  (declare (ignore instruction block system)))
 
 ;;; Rethink what it means to EXECUTE.
 (defmethod constrain-branch-instruction ((instruction cleavir-ir:typeq-instruction) block system)
@@ -271,7 +271,7 @@
          ;; FIXME: replace with ensure gethash or something
          (existing (or (gethash input-value (table (in-constraints block)))
                        (setf (gethash input-value (table (in-constraints block)))
-                             (make-typeq-constraint input-value (cleavir-ctype:top nil)))))
+                             (make-typeq-constraint input-value (cleavir-ctype:top system)))))
          (existing-ctype (type-constraint-ctype existing)))
     (cond ((cleavir-ctype:subtypep existing-ctype ctype system)
            (print "ALWAYS TRUE")
@@ -282,7 +282,7 @@
           ;; more.
           ((cleavir-ctype:subtypep (cleavir-ctype:conjoin/2 ctype existing-ctype system)
                                    (cleavir-ctype:bottom system)
-                                   nil)
+                                   system)
            (print "NEVER TRUE")
            ;; Never executable.
 
@@ -303,7 +303,6 @@
           (make-typeq-constraint
            value
            (if existing
-               ;; FIXME add system arugment
                (cleavir-ctype:disjoin/2 new (type-constraint-ctype existing) system)
                new)))))
 
@@ -361,7 +360,7 @@
               (dolist (predecessor predecessors)
                 (unless (gethash value (table (out-constraints predecessor)))
                   (union-constraint-into-table
-                   (make-typeq-constraint value (cleavir-ctype:top nil))
+                   (make-typeq-constraint value (cleavir-ctype:top system))
                    constraint-table
                    system))))
             (table (out-constraints predecessor)))))
@@ -380,7 +379,7 @@
 ;;; at merge points.
 (defun analyze-types (start system)
   ;; Type inference is a forward data-flow problem.
-  (let ((worklist (cleavir-utilities::depth-first-search-reverse-post-order
+  (let ((worklist (cleavir-utilities:depth-first-search-reverse-postorder
                    start
                    #'cleavir-basic-blocks:successors)))
     (loop
@@ -439,7 +438,7 @@
     (dolist (start starting-blocks)
       (value-number start)
       #+(or)
-      (let ((list (cleavir-utilities::depth-first-search-reverse-post-order
+      (let ((list (cleavir-utilities:depth-first-search-reverse-postorder
                    start
                    #'cleavir-basic-blocks:successors)))
         (dolist (block list)
@@ -449,7 +448,7 @@
     (dolist (start starting-blocks)
       (analyze-types start system)
       #+(or)
-      (let ((list (cleavir-utilities::depth-first-search-reverse-post-order
+      (let ((list (cleavir-utilities:depth-first-search-reverse-postorder
                    start
                    #'cleavir-basic-blocks:successors)))
         (dolist (block list)
