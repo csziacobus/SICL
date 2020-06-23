@@ -215,7 +215,7 @@
                                    (gethash input in-table)
                                    (gethash input out-table)
                                    (if (typep input 'cleavir-ir:lexical-location)
-                                       (error "Potential use before define in HIR? reanalyze")
+                                       (warn "Potential use before define in HIR? reanalyze")
                                        input))))
             (setf (gethash output temp-table) input-number)))))
      block)
