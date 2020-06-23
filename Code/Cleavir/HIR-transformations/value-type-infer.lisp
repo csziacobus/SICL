@@ -55,11 +55,10 @@
 (defun make-value-number () (make-instance 'value-number))
 (defun make-phi-value-number () (make-instance 'phi-value-number))
 
-(defun compute-block-in-eq-data (block predecessors initial-pass-p)
+(defun initialize-block-in-eq-data (block predecessors)
   (cond ((null predecessors)
-         (assert (and (typep (cleavir-basic-blocks:first-instruction block)
-                             'cleavir-ir:enter-instruction)
-                      initial-pass-p))
+         (assert (typep (cleavir-basic-blocks:first-instruction block)
+                        'cleavir-ir:enter-instruction))
          (setf (in-eq-data block) (make-value-number-table)))
         ((null (rest predecessors))
          ;; Can share the same value number table in this case because
@@ -73,14 +72,10 @@
                   (remove-if (lambda (table)
                                (zerop (hash-table-count table)))
                              pred-tables :key #'table))
-                (value-table (if initial-pass-p
-                                 (make-value-number-table
-                                  :size
-                                  (loop for table in initialized-tables
-                                        minimize (hash-table-count (table table))))
-                                 (in-eq-data block))))
-           (when (not initial-pass-p)
-             (assert (equal initialized-tables pred-tables)))
+                (value-table (make-value-number-table
+                              :size
+                              (loop for table in initialized-tables
+                                    minimize (hash-table-count (table table))))))
            (maphash (lambda (datum number)
                       (let ((all-same t)
                             (overdefined nil))
@@ -98,50 +93,76 @@
                           (setf (gethash datum (table value-table))
                                 number))
                         (when overdefined
-                          (if initial-pass-p
-                              (setf (gethash datum (table value-table))
-                                    (make-value-number))
-                              ;; Only allocate a new phi value number
-                              ;; during reanalysis if it has not been
-                              ;; reanalyzed as such yet to prevent
-                              ;; infinite loops.
-
-                              ;; Why does this work?
-
-                              ;; In the initial reanalysis pass, all
-                              ;; predecessor value tables are already
-                              ;; initialized. Therefore, we are
-                              ;; guaranteed to get a fresh congruency
-                              ;; class distinct from all the
-                              ;; predecessors. As flow propagation
-                              ;; goes around and reinitializes all the
-                              ;; predecessors, the true congruency
-                              ;; class will stabilize the second time
-                              ;; around.
-                              (unless (typep (gethash datum (table value-table)) 'phi-value-number)
-                                (setf (gethash datum (table value-table))
-                                      (make-phi-value-number)))))))
+                          (setf (gethash datum (table value-table))
+                                (make-value-number)))))
                     (table (first initialized-tables)))
            (setf (in-eq-data block) value-table)))))
 
-;;; Transfer in data to out data. Return whether it feels like something has changed.
-(defun block-value-transfer (block initial-pass-p)
+(defun reanalyze-block-in-eq-data (block predecessors)
+  (cond ((null predecessors) (error "unreachable"))
+        ((null (rest predecessors))
+         (setf (in-eq-data block) (out-eq-data (first predecessors))))
+        (t
+         ;; Basically intersect over all predecessor value tables.
+         (let* ((pred-tables (mapcar #'out-eq-data predecessors))
+                (value-table (in-eq-data block)))
+           (maphash (lambda (datum number)
+                      (let ((all-same t)
+                            (overdefined nil))
+                        (dolist (table (rest pred-tables))
+                          (let ((other-number (gethash datum (table table))))
+                            (when other-number
+                              (unless (eq number other-number)
+                                (setf all-same nil)
+                                (setf overdefined t)
+                                (return)))))
+                        (when all-same
+                          (setf (gethash datum (table value-table))
+                                number))
+                        (when overdefined
+                          ;; Only allocate a new phi value number
+                          ;; during reanalysis if it has not been
+                          ;; reanalyzed as such yet to prevent
+                          ;; infinite loops.
+
+                          ;; Why does this work?
+
+                          ;; In the initial reanalysis pass, all
+                          ;; predecessor value tables are already
+                          ;; initialized. Therefore, we are
+                          ;; guaranteed to get a fresh congruency
+                          ;; class distinct from all the
+                          ;; predecessors. As flow propagation
+                          ;; goes around and reinitializes all the
+                          ;; predecessors, the true congruency
+                          ;; class will stabilize the second time
+                          ;; around.
+                          (unless (typep (gethash datum (table value-table)) 'phi-value-number)
+                            (setf (gethash datum (table value-table)) (make-phi-value-number))))))
+                    (table (first pred-tables)))
+           (setf (in-eq-data block) value-table)))))
+
+(defun copy-hash-table (hash-table)
+  (let ((new-hash-table (make-hash-table :size (hash-table-count hash-table))))
+    (maphash (lambda (k v)
+               (setf (gethash k new-hash-table) v))
+             hash-table)
+    new-hash-table))
+
+;;; Transfer in data to out data.
+(defun initial-block-value-transfer (block)
   (let* ((in-eq-data (in-eq-data block))
          (in-table (table in-eq-data))
-         (out-eq-data (out-eq-data block))
-         (out-table (table out-eq-data))
-         ;; Need a temporary table to accumulate the effects of
-         ;; assignments without yet committing.
-         (temp-table (make-hash-table :size (abs (- (hash-table-count out-table)
-                                                    (hash-table-count in-table)))))
-         (changed nil))
+         (out-table (copy-hash-table in-table)))
+    ;; Copy the in hash table.
+    (setf (table (out-eq-data block)) out-table)
     (cleavir-basic-blocks:map-basic-block-instructions
      (lambda (instruction)
        (typecase instruction
          (cleavir-ir:assignment-instruction
           (let* ((input (first (cleavir-ir:inputs instruction)))
                  (output (first (cleavir-ir:outputs instruction)))
-                 (input-number (or (gethash input temp-table)
+                 (input-number (or (gethash input out-table)
                                    (gethash input in-table)
                                    (if (typep input 'cleavir-ir:lexical-location)
                                        ;; Assert that this inputs define does not occur after
@@ -150,13 +171,13 @@
                                        ;; initial pass, but this should never happen
                                        ;; thereafter.
                                        (progn
-                                         (warn "Potential use before define in HIR?")
+                                         (warn "Potential use before define in HIR? initial")
                                          :undef)
                                        ;; For any location that isn't a
                                        ;; lexical location, use it
                                        ;; literally.
                                        input))))
-            (setf (gethash output temp-table) input-number)))
+            (setf (gethash output out-table) input-number)))
          (t
           ;; This is where having known functions would plug into
           ;; recording the actual value numbers. For now, just
@@ -166,36 +187,45 @@
           ;; nothing. Basically treating all non-assignment
           ;; instructions as totally opaque.
           (dolist (output (cleavir-ir:outputs instruction))
-            (setf (gethash output temp-table)
-                  (if initial-pass-p
-                      (make-value-number)
-                      ;; Reuse an existing number. It will get
-                      ;; overwritten with the right stuff if it's bad.
-                      (progn
-                        (assert (gethash output out-table))
-                        (gethash output out-table))))))))
+            (setf (gethash output out-table) (make-value-number))))))
+     block)))
+
+(defun block-value-transfer-reanalyze (block)
+  (let* ((in-eq-data (in-eq-data block))
+         (in-table (table in-eq-data))
+         (out-eq-data (out-eq-data block))
+         (out-table (table out-eq-data))
+         ;; Need a temporary table to accumulate the effects of
+         ;; assignments without yet committing so we can check if
+         ;; state has changed or not.
+         (temp-table (make-hash-table))
+         (changed nil))
+    ;; During reanalysis, we really need to only update effects from
+    ;; assignments.
+    (cleavir-basic-blocks:map-basic-block-instructions
+     (lambda (instruction)
+       (typecase instruction
+         (cleavir-ir:assignment-instruction
+          (let* ((input (first (cleavir-ir:inputs instruction)))
+                 (output (first (cleavir-ir:outputs instruction)))
+                 (input-number (or (gethash input temp-table)
+                                   (gethash input in-table)
+                                   (gethash input out-table)
+                                   (if (typep input 'cleavir-ir:lexical-location)
+                                       (error "Potential use before define in HIR? reanalyze")
+                                       input))))
+            (setf (gethash output temp-table) input-number)))))
      block)
     ;; Commit the existing or new value numbers of existing data
     ;; to the out table.
     (maphash (lambda (datum in-number)
-               (let* ((temp-number (gethash datum temp-table))
-                      (out-number (gethash datum out-table))
-                      (new-out-number (or temp-number in-number)))
-                 (unless (eq out-number new-out-number)
-                   (setf (gethash datum out-table) new-out-number)
+               (let ((old-number (gethash datum out-table))
+                     (new-number (or (gethash datum temp-table)
+                                     in-number)))
+                 (unless (eq old-number new-number)
+                   (setf (gethash datum out-table) new-number)
                    (setf changed t))))
              in-table)
-    ;; Inform the out table of the value numbers of new data. Should
-    ;; really only happen in the initial reverse post-order
-    ;; pass... maybe? This is because any new value appearing block
-    ;; locally won't need to be reanalyzed pretty sure.
-    (when initial-pass-p
-      (maphash (lambda (datum temp-number)
-                 (let ((out-number (gethash datum out-table)))
-                   (unless (eq out-number temp-number)
-                     (setf (gethash datum out-table) temp-number)
-                     (setf changed t))))
-               temp-table))
     changed))
 
 (defun value-number (start)
@@ -209,8 +239,8 @@
       (when (null initial-ordering)
         (return))
       (let ((block (pop initial-ordering)))
-        (compute-block-in-eq-data block (cleavir-basic-blocks:predecessors block) t)
-        (block-value-transfer block t)
+        (initialize-block-in-eq-data block (cleavir-basic-blocks:predecessors block))
+        (initial-block-value-transfer block)
         (dolist (succ (cleavir-basic-blocks:successors block))
           ;; Backedge.
           (unless (member succ initial-ordering)
@@ -222,8 +252,8 @@
       (when (null reanalyze)
         (return))
       (let ((block (pop reanalyze)))
-        (compute-block-in-eq-data block (cleavir-basic-blocks:predecessors block) nil)
-        (when (block-value-transfer block nil)
+        (reanalyze-block-in-eq-data block (cleavir-basic-blocks:predecessors block))
+        (when (block-value-transfer-reanalyze block)
           (dolist (succ (cleavir-basic-blocks:successors block))
             (pushnew succ reanalyze)))))))
 
