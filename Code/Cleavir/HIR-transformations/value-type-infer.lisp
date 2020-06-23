@@ -50,7 +50,8 @@
   ((%table :accessor table :initarg :table)))
 
 (defun make-value-number-table (&key (size 0))
-  (make-instance 'value-number-table :table (make-hash-table :size size)))
+  (make-instance 'value-number-table
+                 :table (make-hash-table :test #'eq :size size)))
 
 (defun make-value-number () (make-instance 'value-number))
 (defun make-phi-value-number () (make-instance 'phi-value-number))
@@ -143,7 +144,9 @@
            (setf (in-eq-data block) value-table)))))
 
 (defun copy-hash-table (hash-table)
-  (let ((new-hash-table (make-hash-table :size (hash-table-count hash-table))))
+  (let ((new-hash-table (make-hash-table
+                         :test #'eq
+                         :size (hash-table-count hash-table))))
     (maphash (lambda (k v)
                (setf (gethash k new-hash-table) v))
              hash-table)
@@ -198,7 +201,7 @@
          ;; Need a temporary table to accumulate the effects of
          ;; assignments without yet committing so we can check if
          ;; state has changed or not.
-         (temp-table (make-hash-table))
+         (temp-table (make-hash-table :test #'eq))
          (changed nil))
     ;; During reanalysis, we really need to only update effects from
     ;; assignments.
@@ -277,7 +280,7 @@
 (defclass >-constraint (type-constraint) ())
 
 (defclass constraint-table ()
-  ((%table :accessor table :initform (make-hash-table))))
+  ((%table :accessor table :initform (make-hash-table :test #'eq))))
 
 (defun make-constraint-table ()
   (make-instance 'constraint-table))
