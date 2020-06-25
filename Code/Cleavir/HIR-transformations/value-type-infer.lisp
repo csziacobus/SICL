@@ -16,7 +16,8 @@
 ;;;; TODO actually use the executable flag to reanalyze merge points
 ;;;; for more precise type constraints.
 
-;;;; TODO make value numbering actually aware of EQ-INSTRUCTION
+;;;; TODO make value numbering actually aware of
+;;;; EQ-INSTRUCTION. Probably requires something like a branch effect.
 
 (in-package #:cleavir-hir-transformations)
 
@@ -27,6 +28,9 @@
    ;; data structure.
    (%in-eq-data :accessor in-eq-data :initarg :in-eq-data)
    (%out-eq-data :accessor out-eq-data :initarg :out-eq-data)
+   ;; Used by value numbering to reanalyze value numberings
+   ;; efficiently.
+   (%reanalyze-locations :accessor reanalyze-locations :initform '())
    ;; For all incoming constraints.
    (%in-constraints :accessor in-constraints :initarg :in-constraints)
    ;; From out constraints coming from stuff like THE.
@@ -93,7 +97,7 @@
                         (when all-same
                           (setf (gethash datum (table value-table))
                                 number))
-                        (when overdefined
+                        (when overdefined                          
                           (setf (gethash datum (table value-table))
                                 (make-value-number)))))
                     (table (first initialized-tables)))
@@ -118,6 +122,9 @@
                                 (setf overdefined t)
                                 (return)))))
                         (when all-same
+                          ;; I don't really think its possible that
+                          ;; this scenario introduces new information
+                          ;; that warrants reanalysis. Is it? XXX
                           (setf (gethash datum (table value-table))
                                 number))
                         (when overdefined
@@ -139,6 +146,10 @@
                           ;; class will stabilize the second time
                           ;; around.
                           (unless (typep (gethash datum (table value-table)) 'phi-value-number)
+                            ;; This datum is getting promoted to its
+                            ;; own equivalency class, so record it for
+                            ;; reanalysis.
+                            (push datum (reanalyze-locations block))
                             (setf (gethash datum (table value-table)) (make-phi-value-number))))))
                     (table (first pred-tables)))
            (setf (in-eq-data block) value-table)))))
@@ -203,6 +214,17 @@
          ;; state has changed or not.
          (temp-table (make-hash-table :test #'eq))
          (changed nil))
+    ;; Drain the reanalyze queue. Make sure to do this before
+    ;; assignments take effect.
+    (dolist (location (reanalyze-locations block))
+      #+(or)
+      (format t "~&reanalyzing ~a in block headed by ~a to " location (cleavir-basic-blocks:first-instruction block))
+      (let ((in-value (gethash location in-table)))
+        ;; Make sure not to insert any NIL values into the table.
+        (when in-value
+          (setf (gethash location temp-table)
+                in-value))))
+    (setf (reanalyze-locations block) nil)
     ;; During reanalysis, we really need to only update effects from
     ;; assignments.
     (cleavir-basic-blocks:map-basic-block-instructions
@@ -219,16 +241,16 @@
                                        input))))
             (setf (gethash output temp-table) input-number)))))
      block)
-    ;; Commit the existing or new value numbers of existing data
-    ;; to the out table.
-    (maphash (lambda (datum in-number)
-               (let ((old-number (gethash datum out-table))
-                     (new-number (or (gethash datum temp-table)
-                                     in-number)))
-                 (unless (eq old-number new-number)
-                   (setf (gethash datum out-table) new-number)
-                   (setf changed t))))
-             in-table)
+    ;; Commit the existing or new value numbers of existing data to
+    ;; the out table, setting stuff up for reanalysis.
+    (maphash (lambda (datum temp-number)
+               (let ((old-number (gethash datum out-table)))
+                 (unless (eq old-number temp-number)
+                   (setf (gethash datum out-table) temp-number)
+                   (setf changed t)
+                   (dolist (succ (cleavir-basic-blocks:successors block))
+                     (push datum (reanalyze-locations succ))))))
+             temp-table)
     changed))
 
 (defun value-number (start)
@@ -276,6 +298,7 @@
   ((%ctype :accessor type-constraint-ctype :initarg :ctype)))
 
 (defclass typep-constraint (type-constraint) ())
+;; Unused for now, but obviously desirable in numerical code.
 (defclass <-constraint (type-constraint) ())
 (defclass >-constraint (type-constraint) ())
 
@@ -457,9 +480,9 @@
           (constrain-branch-instruction last block system))))))
 
 ;;; The reason why we track executablep on the blocks is that
-;;; unreachable blocks will actually make the assertion at merge points
-;;; better, if one of the predecessor blocks is determined not
-;;; executable.
+;;; unreachable blocks will actually make the assertion at merge
+;;; points better, if one of the predecessor blocks is determined not
+;;; executable. TODO.
 (defun eliminate-redundant-typeqs (initial-instruction system)
   (let* ((basic-blocks (cleavir-basic-blocks:basic-blocks initial-instruction))
          (instruction-basic-blocks (cleavir-basic-blocks:instruction-basic-blocks basic-blocks))
@@ -492,6 +515,17 @@
           (format t "~&in: ~a" (table (in-constraints block)))
           (format t "~&out: ~a" (table (out-constraints block)))
           (format t "~&executable: ~a" (executablep block)))))
+    ;; We should really fixpoint iterate both the value numbering and
+    ;; type analysis passes together, in the sense that deleting
+    ;; blocks/marking them not executable will actually improve value
+    ;; numbering as well. However, Cleavir does not know anything
+    ;; about incremental/reentrant analyses, so it is pretty hard to
+    ;; make this more general. Instead of passes, Cleavir should
+    ;; really develop a notion of reentrant phases that can be invoked
+    ;; on localized portions of the graph at any time to solve pass
+    ;; ordering issues. Such a system would need support from the IR
+    ;; or some kind of pass manager system. Some other compilers like
+    ;; the Python compiler used in CMU CL and SBCL do this.
     (dolist (block basic-blocks)
       (when (executablep block)
         (let ((last (cleavir-basic-blocks:last-instruction block)))
