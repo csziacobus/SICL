@@ -125,8 +125,7 @@
                           (unless (eq (gethash datum (table value-table))
                                       number)
                             (setf (gethash datum (table value-table))
-                                  number)
-                            (push datum (reanalyze-locations block))))
+                                  number)))
                         (when overdefined
                           ;; Only allocate a new phi value number
                           ;; during reanalysis if it has not been
@@ -146,10 +145,6 @@
                           ;; class will stabilize the second time
                           ;; around.
                           (unless (typep (gethash datum (table value-table)) 'phi-value-number)
-                            ;; This datum is getting promoted to its
-                            ;; own equivalency class, so record it for
-                            ;; reanalysis.
-                            (push datum (reanalyze-locations block))
                             (setf (gethash datum (table value-table)) (make-phi-value-number))))))
                     (table (first pred-tables)))
            (setf (in-eq-data block) value-table)))))
@@ -214,17 +209,6 @@
          ;; state has changed or not.
          (temp-table (make-hash-table :test #'eq))
          (changed nil))
-    ;; Drain the reanalyze queue. Make sure to do this before
-    ;; assignments take effect.
-    (dolist (location (reanalyze-locations block))
-      #+(or)
-      (format t "~&reanalyzing ~a in block headed by ~a to " location (cleavir-basic-blocks:first-instruction block))
-      (let ((in-value (gethash location in-table)))
-        ;; Make sure not to insert any NIL values into the table.
-        (when in-value
-          (setf (gethash location temp-table)
-                in-value))))
-    (setf (reanalyze-locations block) nil)
     ;; During reanalysis, we really need to only update effects from
     ;; assignments.
     (cleavir-basic-blocks:map-basic-block-instructions
@@ -243,14 +227,13 @@
      block)
     ;; Commit the existing or new value numbers of existing data to
     ;; the out table, setting stuff up for reanalysis.
-    (maphash (lambda (datum temp-number)
-               (let ((old-number (gethash datum out-table)))
-                 (unless (eq old-number temp-number)
-                   (setf (gethash datum out-table) temp-number)
-                   (setf changed t)
-                   (dolist (succ (cleavir-basic-blocks:successors block))
-                     (push datum (reanalyze-locations succ))))))
-             temp-table)
+    (maphash (lambda (datum in-number)
+               (let ((old-number (gethash datum out-table))
+                     (new-number (or (gethash datum temp-table) in-number)))
+                 (unless (eq old-number new-number)
+                   (setf (gethash datum out-table) new-number)
+                   (setf changed t))))
+             in-table)
     changed))
 
 (defun value-number (start)
