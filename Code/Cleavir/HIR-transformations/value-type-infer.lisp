@@ -97,7 +97,7 @@
                         (when all-same
                           (setf (gethash datum (table value-table))
                                 number))
-                        (when overdefined                          
+                        (when overdefined
                           (setf (gethash datum (table value-table))
                                 (make-value-number)))))
                     (table (first initialized-tables)))
@@ -122,11 +122,11 @@
                                 (setf overdefined t)
                                 (return)))))
                         (when all-same
-                          ;; I don't really think its possible that
-                          ;; this scenario introduces new information
-                          ;; that warrants reanalysis. Is it? XXX
-                          (setf (gethash datum (table value-table))
-                                number))
+                          (unless (eq (gethash datum (table value-table))
+                                      number)
+                            (setf (gethash datum (table value-table))
+                                  number)
+                            (push datum (reanalyze-locations block))))
                         (when overdefined
                           ;; Only allocate a new phi value number
                           ;; during reanalysis if it has not been
