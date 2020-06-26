@@ -21,6 +21,15 @@
 (defun make-temp ()
   (cleavir-ir:new-temporary))
 
+;;; Given a HIR datum and a context, replace the single result of the
+;;; context with the HIR datum and return the first successor of the
+;;; context.
+(defun replace-context-result (new context)
+  (let ((result (first (results context))))
+    (assert (null (rest (cleavir-ir:using-instructions result))))
+    (cleavir-ir:replace-datum new result))
+  (first (successors context)))
+
 ;;; Given a list of results and a successor, generate a sequence of
 ;;; instructions preceding that successor, and that assign NIL to each
 ;;; result in the list.
@@ -571,10 +580,18 @@
 ;;; Compile a SETQ-AST.
 
 (defmethod compile-ast ((ast cleavir-ast:setq-ast) context)
-  (let ((location (find-or-create-location (cleavir-ast:lhs-ast ast))))
-    (compile-ast
-     (cleavir-ast:value-ast ast)
-     (clone-context context :results (list location)))))
+  (let ((location (find-or-create-location (cleavir-ast:lhs-ast ast)))
+        (value-ast (cleavir-ast:value-ast ast)))
+    (typecase value-ast
+      (cleavir-ast:lexical-ast
+       (cleavir-ir:make-assignment-instruction
+        (find-or-create-location value-ast)
+        location
+        (first (successors context))))
+      (t
+       (compile-ast
+        value-ast
+        (clone-context context :results (list location)))))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;
@@ -842,10 +859,7 @@
 ;;; This AST has ONE-VALUE-AST-MIXIN as a superclass.
 
 (defmethod compile-ast ((ast cleavir-ast:lexical-ast) context)
-  (cleavir-ir:make-assignment-instruction
-   (find-or-create-location ast)
-   (first (results context))
-   (first (successors context))))
+  (replace-context-result (find-or-create-location ast) context))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;
@@ -956,13 +970,8 @@
 ;;; has a single result.
 
 (defmethod compile-ast ((ast cleavir-ast:immediate-ast) context)
-  (with-accessors ((results results)
-		   (successors successors))
-      context
-    (cleavir-ir:make-assignment-instruction
-     (cleavir-ir:make-immediate-input (cleavir-ast:value ast))
-     (first results)
-     (first successors))))
+  (replace-context-result (cleavir-ir:make-immediate-input (cleavir-ast:value ast))
+                          context))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;
@@ -1126,11 +1135,6 @@
 ;;; it has a single result.
 
 (defmethod compile-ast ((ast cleavir-ast:load-time-value-ast) context)
-  (with-accessors ((results results)
-		   (successors successors))
-      context
-    (cleavir-ir:make-assignment-instruction
-     (cleavir-ir:make-load-time-value-input
-      (cleavir-ast:form ast) (cleavir-ast:read-only-p ast))
-     (first results)
-     (first successors))))
+  (replace-context-result (cleavir-ir:make-load-time-value-input
+                           (cleavir-ast:form ast) (cleavir-ast:read-only-p ast))
+                          context))
