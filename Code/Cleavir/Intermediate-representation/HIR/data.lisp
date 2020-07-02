@@ -18,6 +18,11 @@
 ;;;     and output to instructions.  It holds a single Lisp datum, but
 ;;;     that datum can be BOXED or UNBOXED.
 ;;;
+;;;   * LEXICAL-VARIABLE.  This type of data represents a lexical
+;;;     variable bound by LAMBDA.  It can be used as both input and
+;;;     output to instructions, and may be closed over. It is a
+;;;     subtype of LEXICAL-LOCATION.
+;;;
 ;;;   * VALUES-LOCATION.  This type of data can be used both as input
 ;;;     and output to instructions.  It holds a an arbitrary number of
 ;;;     Lisp values.  The number of values it holds is statically
@@ -75,6 +80,24 @@
 ;;; Generate a new lexical location
 (defun new-temporary (&optional (thing nil thing-p))
   (make-lexical-location (if thing-p (gensym thing) (gensym))))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;
+;;; Datum class LEXICAL-VARIABLE.
+;;;
+;;; This datum class is used when the initial HIR program is created
+;;; for any lexical variable bound by a lexical binding.
+
+(defclass lexical-variable (lexical-location)
+  ((%name :initarg :name :reader name)
+   (%lexical-bind :initarg :lexical-bind :reader lexical-bind)))
+
+(defun make-lexical-variable (name)
+  (make-instance 'lexical-variable :name name))
+
+(defmethod print-object ((object lexical-variable) stream)
+  (print-unreadable-object (object stream :type t)
+    (format stream "~a" (name object))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;

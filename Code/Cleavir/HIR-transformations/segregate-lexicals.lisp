@@ -1,38 +1,6 @@
 (cl:in-package #:cleavir-hir-transformations)
 
-(defun data (instruction)
-  (append (cleavir-ir:inputs instruction)
-	  (cleavir-ir:outputs instruction)))
-
-;;; By SEGREGATING lexical locations, we mean taking each lexical
-;;; location and turning it into either a dynamic lexical location
-;;; (which can be allocated in a register or on the stack) or a
-;;; static lexical location (which may or may not be possible to
-;;; allocate on the stack, and might have to be allocated in some
-;;; other place, possibly on the heap).
-;;;
-;;; The method used here is very simple, and not particularly
-;;; sophisticated.  It assumes that every nested function can escape
-;;; in arbitrary ways, so that every lexical location that is shared
-;;; by some function F and some other function G nested inside F must
-;;; be an static lexical location.
-;;;
-;;; LOCATION-OWNERS is an EQ hash table mapping each lexical location
-;;; to its owner.
-;;;
-;;; We return a list of the lexical locations that have been
-;;; categorized as static lexical locations.
-
-(defun segregate-lexicals (initial-instruction location-owners)
-  (let ((result '()))
-    (cleavir-ir:map-instructions-with-owner
-     (lambda (instruction owner)
-       (loop for datum in (data instruction)
-             do (when (typep datum 'cleavir-ir:lexical-location)
-                  (unless (eq owner (gethash datum location-owners))
-                    (pushnew datum result)))))
-     initial-instruction)
-    result))
+;;; FIXME: All comments out of date.
 
 ;;; Given a static lexical location and an EQ hash table giving the
 ;;; owner of each instruction, return a list of all the functions
@@ -54,13 +22,15 @@
 
 ;;; Given a list of ENTER-INSTRUCTIONs, return an alist mapping each
 ;;; ENTER-INSTRUCTION to a new dynamic lexical location.
-(defun allocate-dynamic-locations (enter-instructions location)
-  (let ((name (if (read-only-location-p location)
-                  (string (cleavir-ir:name location))
-                  "CELL")))
+(defun allocate-dynamic-locations (enter-instructions variable value-cell-p)
+  (declare (ignore value-cell-p))
+  (let ((name (cleavir-ir:name variable)))
     (loop for enter-instruction in enter-instructions
           collect (cons enter-instruction
-                        (cleavir-ir:new-temporary name)))))
+                        (cleavir-ir:new-temporary
+                         (if (symbolp name)
+                             (symbol-name name)
+                             "complex-name"))))))
 
 ;;; Given an ENCLOSE-INSTRUCTION and the dynamic lexical location ,
 ;;; import the dynamic lexical location to the ENCLOSE-INSTRUCTION
@@ -81,10 +51,17 @@
                nil)))
       ;; Defer initialization until all potentially mutually recurisve
       ;; functions are available.
-      (do ((current-enclose enclose (first (cleavir-ir:successors current-enclose))))
-          ((not (typep (first (cleavir-ir:successors current-enclose))
-                       'cleavir-ir:enclose-instruction))
-           (cleavir-ir:insert-instruction-after initializer current-enclose)))
+      (do* ((instruction enclose successor)
+            (successor (first (cleavir-ir:successors instruction)) (first (cleavir-ir:successors successor))))
+           ((and (null (rest (cleavir-ir:predecessors successor)))
+                 (not (typep successor
+                             ;; This set of instruction types is guaranteed
+                             ;; not to call potentially uninitialized
+                             ;; closures.
+                             '(or cleavir-ir:enclose-instruction
+                               cleavir-ir:assignment-instruction
+                               cleavir-ir:lexical-bind-instruction))))
+           (cleavir-ir:insert-instruction-after initializer instruction)))
       (setf (cleavir-ir:initializer enclose) initializer)
       (setf (gethash initializer instruction-owners)
             (gethash enclose instruction-owners)))
@@ -136,17 +113,7 @@
 ;;; every other ENTER-INSTRUCTION in DYNAMIC-LOCATIONS we add a FETCH
 ;;; instruction after it, and we import the dynamic location of the
 ;;; parent function into the corresponding ENCLOSE-INSTRUCTION.
-(defun ensure-dynamic-location-available (function-dag dynamic-locations owner read-only-location-p instruction-owners)
-  (unless read-only-location-p
-    ;; Start by creating a CREATE-CELL-INSTRUCTION after the owner of
-    ;; the static lexical location to be eliminated.
-    (let ((cleavir-ir:*origin* (cleavir-ir:origin owner))
-          (cleavir-ir:*policy* (cleavir-ir:policy owner))
-          (cleavir-ir:*dynamic-environment*
-            (cleavir-ir:dynamic-environment owner)))
-      (cleavir-ir:insert-instruction-after
-       (cleavir-ir:make-create-cell-instruction (cdr (assoc owner dynamic-locations)))
-       owner)))
+(defun ensure-dynamic-location-available (function-dag dynamic-locations owner instruction-owners)
   ;; Next, for each entry in DYNAMIC-LOCATIONS other than OWNER, transmit
   ;; the cell from the corresponding ENCLOSE-INSTRUCTION to the
   ;; ENTER-INSTRUCTION of that entry.
@@ -203,7 +170,8 @@
     (cleavir-ir:insert-instruction-before
      (cleavir-ir:make-read-cell-instruction cloc d)
      instruction)
-    (cleavir-ir:substitute-input d sloc instruction)))
+    (cleavir-ir:substitute-input d sloc instruction)
+    (cleavir-hir-transformations:copy-propagate-1 d)))
 
 ;;; Given a single static lexical location SLOC, a dynamic lexical
 ;;; location CLOC holding the cell that replaces SLOC, and a single
@@ -229,9 +197,10 @@
          (first (cleavir-ir:successors instruction)))
         (cleavir-ir:insert-instruction-after
          (cleavir-ir:make-write-cell-instruction cloc d)
-         instruction))))
+         instruction))
+    (cleavir-hir-transformations:copy-propagate-1 d)))
 
-(defun read-only-location-p (location)
+(defun read-only-variable-p (location)
   (let ((definers (cleavir-ir:defining-instructions location)))
     (and definers (null (rest definers)))))
 
@@ -242,51 +211,108 @@
 ;;; function dag of the entire program.  INSTRUCTION-OWNERS is a hash
 ;;; table mapping an instruction to its owner.  OWNER is the owner of
 ;;; LOCATION.
-(defun process-location
-    (location function-dag instruction-owners owner)
-  (let* (;; Determine all the functions (represented by
+(defun process-lexical-bind
+    (lexical-bind function-dag instruction-owners)
+  (let* ((owner (gethash lexical-bind instruction-owners))
+         (variable (first (cleavir-ir:outputs lexical-bind)))
+         ;; Determine all the functions (represented by
 	 ;; ENTER-INSTRUCTIONs) that use (read or write) the location.
-	 (users (functions-using-location location instruction-owners))
+	 (users (functions-using-location variable instruction-owners))
 	 ;; To that set, add the intermediate functions.
 	 (enters (add-intermediate-functions users function-dag owner))
-         (read-only-location-p (read-only-location-p location))
+         (read-only-variable-p (read-only-variable-p variable))
+         ;; A variable is closed over if it is used in a function that
+         ;; is not the owner.
+         (closed-over-p (rest users))
+         ;; A variable becomes a value cell if it is closed over and
+         ;; not read only.
+         (value-cell-p (and closed-over-p (not read-only-variable-p)))
          ;; Compute a dictionary that associates each
          ;; ENTER-INSTRUCTION with a dynamic location.
-         (dynamic-locations (allocate-dynamic-locations enters location)))
-    (loop for instruction in (cleavir-ir:using-instructions location)
+         (dynamic-locations (allocate-dynamic-locations enters variable value-cell-p)))
+    (loop for reference in (cleavir-ir:using-instructions variable)
+          for instruction-owner = (gethash reference instruction-owners)
+          for dynamic-location = (cdr (assoc instruction-owner dynamic-locations))
+          do ;; FIXME: not everything is a reference yet. stuff like
+             ;; THE needs to be fixed still to reference before using
+             ;; lexical variable.
+             (when (typep reference 'cleavir-ir:reference-instruction)
+               (change-class reference 'cleavir-ir:assignment-instruction))
+             (if value-cell-p
+                 (replace-inputs variable dynamic-location reference)
+                 (cleavir-ir:substitute-input dynamic-location variable reference)))
+    (loop for instruction in (cleavir-ir:defining-instructions variable)
           for instruction-owner = (gethash instruction instruction-owners)
           for dynamic-location = (cdr (assoc instruction-owner dynamic-locations))
-          do (if read-only-location-p
-                 (cleavir-ir:substitute-input dynamic-location location instruction)
-                 (replace-inputs location dynamic-location instruction)))
-    (loop for instruction in (cleavir-ir:defining-instructions location)
-          for instruction-owner = (gethash instruction instruction-owners)
-          for dynamic-location = (cdr (assoc instruction-owner dynamic-locations))
-          do (if read-only-location-p
-                 (cleavir-ir:substitute-output dynamic-location location instruction)
-                 (replace-outputs location dynamic-location instruction)))
+          do (if value-cell-p
+                 (replace-outputs variable dynamic-location instruction)
+                 (cleavir-ir:substitute-output dynamic-location variable instruction)))
+    (when value-cell-p
+      ;; Start by creating a CREATE-CELL-INSTRUCTION after the owner of
+      ;; the static lexical location to be eliminated.
+      (let ((cleavir-ir:*origin* (cleavir-ir:origin owner))
+            (cleavir-ir:*policy* (cleavir-ir:policy owner))
+            (cleavir-ir:*dynamic-environment*
+              (cleavir-ir:dynamic-environment owner)))
+        (cleavir-ir:insert-instruction-after
+         (cleavir-ir:make-create-cell-instruction (cdr (assoc owner dynamic-locations)))
+         lexical-bind)))
+    (change-class lexical-bind 'cleavir-ir:assignment-instruction)
     ;; We do this step last, so that we are sure that the CREATE-CELL
     ;; and FETCH instructions are inserted immediately after the ENTER
     ;; instruction.
-    (ensure-dynamic-location-available function-dag dynamic-locations owner read-only-location-p instruction-owners)))
+    (ensure-dynamic-location-available function-dag dynamic-locations owner instruction-owners)
+    (cleavir-hir-transformations:copy-propagate-1 (first (cleavir-ir:inputs lexical-bind)))
+    ;; Dynamic locations are eligible for copy propagation.
+    (dolist (dynamic-location dynamic-locations)
+      (cleavir-hir-transformations:copy-propagate-1 (cdr dynamic-location)))))
 
+(defun process-catch
+    (catch function-dag instruction-owners)
+  (let* ((owner (gethash catch instruction-owners))
+         (continuation (first (cleavir-ir:outputs catch)))
+         ;; Determine all the functions (represented by
+	 ;; ENTER-INSTRUCTIONs) that use (read or write) the location.
+	 (users (functions-using-location continuation instruction-owners))
+	 ;; To that set, add the intermediate functions.
+	 (enters (add-intermediate-functions users function-dag owner))
+         ;; Compute a dictionary that associates each
+         ;; ENTER-INSTRUCTION with a dynamic location.
+         (dynamic-locations (allocate-dynamic-locations enters continuation nil)))
+    (loop for instruction in (cleavir-ir:using-instructions continuation)
+          for instruction-owner = (gethash instruction instruction-owners)
+          for dynamic-location = (cdr (assoc instruction-owner dynamic-locations))
+          do (cleavir-ir:substitute-input dynamic-location continuation instruction))
+    (loop for instruction in (cleavir-ir:defining-instructions continuation)
+          for instruction-owner = (gethash instruction instruction-owners)
+          for dynamic-location = (cdr (assoc instruction-owner dynamic-locations))
+          do (cleavir-ir:substitute-output dynamic-location continuation instruction))
+    ;; We do this step last, so that we are sure that the CREATE-CELL
+    ;; and FETCH instructions are inserted immediately after the ENTER
+    ;; instruction.
+    (ensure-dynamic-location-available function-dag dynamic-locations owner instruction-owners)
+    ;; Dynamic locations are eligible for copy propagation.
+    (dolist (dynamic-location dynamic-locations)
+      (cleavir-hir-transformations:copy-propagate-1 (cdr dynamic-location)))))
+
+(defun process-lexical-variables (initial-instruction)
+  (let ((instruction-owners (compute-instruction-owners initial-instruction))
+        (function-dag (build-function-dag initial-instruction))
+        (binds '())
+        (catches '()))
+    (cleavir-ir:map-instructions-arbitrary-order
+     (lambda (instruction)
+       (typecase instruction
+         (cleavir-ir:lexical-bind-instruction (push instruction binds))
+         (cleavir-ir:catch-instruction (push instruction catches))))
+     initial-instruction)
+    (dolist (bind binds)
+      (process-lexical-bind bind function-dag instruction-owners))
+    (dolist (catch catches)
+      (process-catch catch function-dag instruction-owners))))
+
+;;; Sort of a misnomer. It processes all lexical variables.
 (defun process-captured-variables (initial-instruction)
   ;; Make sure everything is up to date.
   (cleavir-ir:reinitialize-data initial-instruction)
-  (let* ((instruction-owners (compute-instruction-owners initial-instruction))
-	 (location-owners (compute-location-owners initial-instruction))
-	 (function-dag (build-function-dag initial-instruction))
-	 (static-locations
-	   (segregate-lexicals initial-instruction location-owners)))
-    (loop for static-location in static-locations
-	  for owner = (gethash static-location location-owners)
-	  do (process-location static-location
-			       function-dag
-			       instruction-owners
-			       owner))))
-
-(defun segregate-only (initial-instruction)
-  ;; Make sure everything is up to date.
-  (cleavir-ir:reinitialize-data initial-instruction)
-  (let ((location-owners (compute-location-owners initial-instruction)))
-    (segregate-lexicals initial-instruction location-owners)))
+  (process-lexical-variables initial-instruction))

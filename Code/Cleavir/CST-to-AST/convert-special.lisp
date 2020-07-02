@@ -254,13 +254,13 @@
                        (name (cst:raw name-cst)))
                   (cons name fun))))
 
-;;; Compute and return a list of SETQ-ASTs that will assign the AST of
-;;; each function in a list of function ASTs to its associated
-;;; LEXICAL-AST.  FUNCTIONS is a list of CONS cells.  Each CONS cell
-;;; has a function name in its CAR and an AST in its CDR.
+;;; Compute and return a list of LEXICAL-BINDING-ASTs that will assign
+;;; the AST of each function in a list of function ASTs to its
+;;; associated LEXICAL-AST.  FUNCTIONS is a list of CONS cells.  Each
+;;; CONS cell has a function name in its CAR and an AST in its CDR.
 (defun compute-function-init-asts (functions env)
   (loop for (name . fun-ast) in functions
-        collect (cleavir-ast:make-setq-ast
+        collect (cleavir-ast::make-lexical-binding-ast
                  (function-lexical env name)
                  fun-ast)))
 

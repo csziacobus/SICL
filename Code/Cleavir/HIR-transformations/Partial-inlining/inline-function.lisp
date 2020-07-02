@@ -1,6 +1,6 @@
 (cl:in-package #:cleavir-partial-inlining)
 
-;;; Remvoe an enter instruction from the list of predecessors of its successors.
+;;; Remove an enter instruction from the list of predecessors of its successors.
 (defun disconnect-predecessor (instruction)
   (dolist (successor (cleavir-ir:successors instruction))
     (setf (cleavir-ir:predecessors successor)
@@ -28,13 +28,7 @@
                  for arg in (rest (cleavir-ir:inputs call))
                  for temp = (cleavir-ir:new-temporary)
                  for assign = (cleavir-ir:make-assignment-instruction arg temp)
-                 do (when (cleavir-ir:using-instructions location)
-                      (let ((binding-assign (first (cleavir-ir:using-instructions location))))
-                        ;; Don't have to push these onto the binding
-                        ;; assignment list, because only the clones
-                        ;; will end up needing cells.
-                        (change-class binding-assign 'binding-assignment-instruction)))
-                    (cleavir-ir:insert-instruction-before assign call)
+                 do (cleavir-ir:insert-instruction-before assign call)
                     (setf (instruction-owner assign) *target-enter-instruction*)
                     (add-to-mapping mapping location temp)
                     (setf (location-owner temp) *target-enter-instruction*)

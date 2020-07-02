@@ -1,5 +1,38 @@
 (in-package #:cleavir-partial-inlining)
 
+;;; Determine the use set of funcalls ignoring trivial assignments,
+;;; bindings, and reference nodes. If there is a use that is not a
+;;; funcall, return :ESCAPE.
+(defun funcall-uses (datum)
+  (cleavir-hir-transformations:copy-propagate-1 datum)
+  (let ((uses '())
+        (eq-data (list datum))
+        (worklist (cleavir-ir:using-instructions datum)))
+    (loop
+      (when (null worklist)
+        (return uses))
+      (let ((instruction (pop worklist)))
+        (typecase instruction
+          (cleavir-ir:lexical-bind-instruction
+           (let ((output-variable (first (cleavir-ir:outputs instruction))))
+             (unless (rest (cleavir-ir:defining-instructions output-variable))
+               (dolist (reference (cleavir-ir:using-instructions output-variable))
+                 (let ((location (first (cleavir-ir:outputs reference))))
+                   (cleavir-hir-transformations:copy-propagate-1 location)
+                   (pushnew location eq-data)
+                   (dolist (use (cleavir-ir:using-instructions location))
+                     (pushnew use worklist)))))))
+          (cleavir-ir:funcall-instruction
+           ;; Check for call position
+           (unless (and (member (first (cleavir-ir:inputs instruction)) eq-data)
+                        (notany (lambda (datum)
+                                  (member datum (rest (cleavir-ir:inputs instruction))))
+                                eq-data))
+             (return :escape))
+           (pushnew instruction uses))
+          (t
+           (return :escape)))))))
+
 ;;; Analyze the flow graph to see if there are local functions that
 ;;; can be usefully integrated (contified). And if so, then interpolate.
 (defun interpolable-function-analyze (initial-instruction)
@@ -7,17 +40,14 @@
   ;; contification.
   (cleavir-hir-transformations:eliminate-catches initial-instruction)
   ;; Find every enclose instruction and analyze those.
-  (let ((*instruction-ownerships* (cleavir-hir-transformations:compute-instruction-owners initial-instruction))
-        (*location-ownerships* (cleavir-hir-transformations:compute-location-owners initial-instruction))
-        (*binding-assignments* '()))
+  (let ((*instruction-ownerships* (cleavir-hir-transformations:compute-instruction-owners initial-instruction)))
     ;; Going in map-instructions order means top down order in the
     ;; function nesting tree, which captures more functions.
     (cleavir-ir:map-instructions
      (lambda (instruction)
        (when (typep instruction 'cleavir-ir:enclose-instruction)
          (interpolable-function-analyze-1 instruction)))
-     initial-instruction)
-    (convert-binding-instructions *binding-assignments*)))
+     initial-instruction)))
 
 ;; Do a simple interpolable analysis on one enclose, and act if
 ;; possible.
@@ -27,9 +57,9 @@
     ;; FIXME: Bail if the function arg processing is too hairy somehow.
     (when (lambda-list-too-hairy-p (cleavir-ir:lambda-list code))
       (return-from interpolable-function-analyze-1))
-    ;; Copy propagate so silly assignments don't trip us up.
-    (cleavir-hir-transformations:copy-propagate-1 fun)
-    (let ((users (cleavir-ir:using-instructions fun)))
+    (let ((users (funcall-uses fun)))
+      (when (eq users :escape)
+        (return-from interpolable-function-analyze-1))
       (multiple-value-bind (return-point common-output common-dynenv target-owner)
           (common-return-cont enclose users fun)
         (case return-point
@@ -123,13 +153,6 @@
         common-dynenv
         target-owner)
     (dolist (user users)
-      ;; Make sure all users are actually call instructions that only
-      ;; use FUN in call position.
-      (unless (and (typep user 'cleavir-ir:funcall-instruction)
-                   (eq (first (cleavir-ir:inputs user)) fun)
-                   (not (member fun (rest (cleavir-ir:inputs user)))))
-        (setf return-point :escape)
-        (return))
       (let ((cont (logical-continuation enclose user))
             (dynenv (cleavir-ir:dynamic-environment user))
             (output (first (cleavir-ir:outputs user)))
@@ -168,12 +191,11 @@
           (setq state :optional)
           (let* ((arg (nth position args))
                  (assign (make-instance
-                          'binding-assignment-instruction
+                          'cleavir-ir:assignment-instruction
                           :inputs (list (or arg (cleavir-ir:make-load-time-value-input nil t)))
                           :outputs (list (ecase state
                                            (:required item)
                                            (:optional (first item)))))))
-            (push assign *binding-assignments*)
             (cleavir-ir:insert-instruction-before assign call)
             (when (eq state :optional)
               (change-class (second item)
@@ -183,7 +205,6 @@
             (incf position)))))
   ;; Replace the call with a regular control arc into the function.
   (cleavir-ir:bypass-instruction (first (cleavir-ir:successors enter)) call))
-
 
 ;; Fix up the return values, and replace return instructions with NOPs
 ;; that go to after the call.
@@ -218,12 +239,6 @@
                  old-dynenv)
          (setf (cleavir-ir:dynamic-environment instruction)
                new-dynenv))
-       (dolist (input (cleavir-ir:inputs instruction))
-         (when (eq (location-owner input) enter)
-           (setf (location-owner input) target-enter)))
-       (dolist (output (cleavir-ir:outputs instruction))
-         (when (eq (location-owner output) enter)
-           (setf (location-owner output) target-enter)))
        (when (typep instruction 'cleavir-ir:unwind-instruction)
          (push instruction unwinds)))
      enter)

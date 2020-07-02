@@ -40,29 +40,24 @@
                     (enclose (cleavir-hir-transformations:enclose-instruction node))
                     (fun (first (cleavir-ir:outputs enclose)))
                     result)
-               (cleavir-hir-transformations:copy-propagate-1 fun)
                (when (all-parameters-required-p enter)
-                 ;; Now we just need to pick off any recursive uses, direct or indirect.
-                 (loop for user in (cleavir-ir:using-instructions fun)
-                       ;; Make sure all users are actually call instructions that only
-                       ;; use FUN in call position.
-                       unless (and (typep user 'cleavir-ir:funcall-instruction)
-                                   (eq (first (cleavir-ir:inputs user)) fun)
-                                   (not (member fun (rest (cleavir-ir:inputs user)))))
-                         return nil
-                       when (parent-node-p node (instruction-owner user)) ; recursive
-                         return nil
-                       ;; For now, since M-V-C doesn't track inlining
-                       ;; information, only check explicit inline
-                       ;; declarations for local functions.
-                       unless (or (typep user 'cleavir-ir:multiple-value-call-instruction)
-                                  (eq (cleavir-ir:inline-declaration user) 'inline))
-                         return nil
-                       unless (call-valid-p enter user)
-                         return nil
-                       ;; We're all good, but keep looking through for escapes and recursivity.
-                       do (setf result (list enter user node))
-                       finally (return-from one-potential-inline result)))))
+                 (let ((users (funcall-uses fun)))
+                   (unless (eq users :escape)
+                     ;; Now we just need to pick off any recursive uses, direct or indirect.
+                     (loop for user in users
+                           when (parent-node-p node (instruction-owner user)) ; recursive
+                             return nil
+                           ;; For now, since M-V-C doesn't track inlining
+                           ;; information, only check explicit inline
+                           ;; declarations for local functions.
+                           unless (or (typep user 'cleavir-ir:multiple-value-call-instruction)
+                                      (eq (cleavir-ir:inline-declaration user) 'inline))
+                             return nil
+                           unless (call-valid-p enter user)
+                             return nil
+                           ;; We're all good, but keep looking through for escapes and recursivity.
+                           do (setf result (list enter user node))
+                           finally (return-from one-potential-inline result)))))))
            (parent-node-p (parent enter)
              ;; parent is a node (i.e. enclose), enter is an enter instruction
              ;; we return T iff the enter is enclosed by a node that has parent
@@ -85,30 +80,6 @@
     ;; No dice.
     nil))
 
-;;; Returns whether the location needs an explicit cell.
-(defun explicit-cell-p (location)
-  (let ((owner (gethash location *location-ownerships*)))
-    (and (not (cleavir-hir-transformations:read-only-location-p location))
-         (dolist (user (cleavir-ir:using-instructions location))
-           (unless (eq (gethash user *instruction-ownerships*) owner)
-             (return t))))))
-
-;;; Introduce cells for those bound locations which need them.
-(defun convert-binding-instructions (binding-assignments)
-  (dolist (binding-assignment binding-assignments)
-    (let ((location (first (cleavir-ir:outputs binding-assignment))))
-      (when (and location (explicit-cell-p location))
-        (let ((create (make-instance 'cleavir-ir:create-cell-instruction
-                        :origin (cleavir-ir:origin binding-assignment)
-                        :policy (cleavir-ir:policy binding-assignment)
-                        :dynamic-environment (cleavir-ir:dynamic-environment binding-assignment))))
-          (dolist (user (cleavir-ir:using-instructions location))
-            (cleavir-hir-transformations:replace-inputs location location user))
-          (dolist (definer (cleavir-ir:defining-instructions location))
-            (cleavir-hir-transformations:replace-outputs location location definer))
-          (cleavir-ir:insert-instruction-after create binding-assignment)
-          (setf (cleavir-ir:outputs create) (list location)))))))
-
 (defun full-inlining-pass (initial-instruction)
   ;; Need to remove all useless instructions first for incremental
   ;; r-u-i to catch everything.
@@ -118,7 +89,6 @@
         with *location-ownerships*
           = (cleavir-hir-transformations:compute-location-owners initial-instruction)
         with *function-dag* = (cleavir-hir-transformations:build-function-dag initial-instruction)
-        with *binding-assignments* = '()
         for inline = (one-potential-inline *function-dag*)
         until (null inline)
         do (destructuring-bind (enter call node) inline
@@ -139,8 +109,7 @@
            ;; the unreachable portion of the graph. It is important
            ;; because read-only analysis depends on accurate data
            ;; information.
-           (cleavir-ir:reinitialize-data initial-instruction)
-           (convert-binding-instructions *binding-assignments*)))
+           (cleavir-ir:reinitialize-data initial-instruction)))
 
 (defun do-inlining (initial-instruction)
   ;; Do this first to pick off stuff that doesn't need full copying

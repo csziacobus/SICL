@@ -29,6 +29,16 @@
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;
+;;; Drawing datum LEXICAL-LOCATION.
+
+(defmethod draw-datum ((datum lexical-variable) stream)
+  (format stream "  ~a [shape = ellipse, style = filled];~%"
+	  (datum-id datum))
+  (format stream "   ~a [fillcolor = green, label = \"~a\"]~%"
+	  (datum-id datum) (name datum)))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;
 ;;; Drawing datum VALUES-LOCATION.
 
 (defmethod draw-datum ((datum values-location) stream)
@@ -205,6 +215,10 @@
 (defmethod label ((instruction unreachable-instruction)) "unreachable")
 
 (defmethod label ((instruction assignment-instruction)) "<-")
+
+(defmethod label ((instruction lexical-bind-instruction)) "lexical bind")
+
+(defmethod label ((instruction reference-instruction)) "reference")
 
 (defmethod label ((instruction funcall-instruction)) "funcall")
 

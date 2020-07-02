@@ -68,6 +68,34 @@
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;
+;;; Instruction LEXICAL-BIND.
+
+(defclass lexical-bind-instruction (one-successor-mixin instruction)
+  ())
+
+(defun make-lexical-bind-instruction
+    (input output &optional (successor nil successor-p))
+  (make-instance 'lexical-bind-instruction
+    :inputs (list input)
+    :outputs (list output)
+    :successors (if successor-p (list successor) '())))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;
+;;; Instruction REFERENCE-INSTRUCTION.
+
+(defclass reference-instruction (one-successor-mixin instruction)
+  ())
+
+(defun make-reference-instruction
+    (input output &optional (successor nil successor-p))
+  (make-instance 'reference-instruction
+    :inputs (list input)
+    :outputs (list output)
+    :successors (if successor-p (list successor) '())))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;
 ;;; Instruction FUNCALL-INSTRUCTION.
 
 (defclass funcall-instruction

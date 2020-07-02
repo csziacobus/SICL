@@ -35,10 +35,6 @@
 ;;; This variable contains the function DAG.
 (defvar *function-dag*)
 
-;;; This variable keeps a list of all binding assignments introduced
-;;; by the inliner.
-(defvar *binding-assignments*)
-
 ;;; Interface.
 (defun instruction-owner (instruction)
   (gethash instruction *instruction-ownerships*))

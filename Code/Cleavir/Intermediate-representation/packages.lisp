@@ -14,6 +14,8 @@
    #:value
    #:lexical-location #:make-lexical-location
    #:new-temporary
+   #:lexical-variable #:make-lexical-variable
+   #:lexical-bind
    #:name
    #:values-location #:make-values-location
    #:variable-p
@@ -53,6 +55,8 @@
    #:nop-instruction #:make-nop-instruction
    #:unreachable-instruction #:make-unreachable-instruction
    #:assignment-instruction #:make-assignment-instruction
+   #:lexical-bind-instruction #:make-lexical-bind-instruction
+   #:reference-instruction #:make-reference-instruction
    #:funcall-instruction #:make-funcall-instruction #:inline-declaration
    #:funcall-no-return-instruction #:make-funcall-no-return-instruction
    #:tailcall-instruction #:make-tailcall-instruction

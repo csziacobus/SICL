@@ -198,6 +198,18 @@
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;
+;;; Class LEXICAL-VARIABLE-AST.
+;;;
+;;; A LEXICAL-VARIABLE-AST represents a reference to a lexical
+;;; variable which is bound.  Such a reference contains the name of
+;;; the variable, but it is used only for debugging purposes and for
+;;; the purpose of error reporting.
+
+(defclass lexical-variable-ast (lexical-ast)
+  ())
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;
 ;;; Class SYMBOL-VALUE-AST.
 ;;;
 ;;; This AST is generated from a reference to a special variable.
@@ -519,6 +531,30 @@
 
 (defmethod children ((ast return-from-ast))
   (list (form-ast ast)))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;
+;;; Class LEXICAL-BINDING-AST.
+;;;
+;;; This AST represents the binding of a lexical variable.
+
+(defclass lexical-binding-ast (no-value-ast-mixin ast)
+  ((%lhs-ast :initarg :lhs-ast :reader lhs-ast)
+   (%value-ast :initarg :value-ast :reader value-ast)))
+
+(defun make-lexical-binding-ast (lhs-ast value-ast &key origin (policy *policy*))
+  (change-class lhs-ast 'lexical-variable-ast)
+  (make-instance 'lexical-binding-ast
+    :origin origin :policy policy
+    :lhs-ast lhs-ast
+    :value-ast value-ast))
+
+(cleavir-io:define-save-info lexical-binding-ast
+  (:lhs-ast lhs-ast)
+  (:value-ast value-ast))
+
+(defmethod children ((ast lexical-binding-ast))
+  (list (lhs-ast ast) (value-ast ast)))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;
