@@ -53,15 +53,18 @@
       ;; functions are available.
       (do* ((instruction enclose successor)
             (successor (first (cleavir-ir:successors instruction)) (first (cleavir-ir:successors successor))))
-           ((and (null (rest (cleavir-ir:predecessors successor)))
-                 (not (typep successor
-                             ;; This set of instruction types is guaranteed
-                             ;; not to call potentially uninitialized
-                             ;; closures.
-                             '(or cleavir-ir:enclose-instruction
-                               cleavir-ir:assignment-instruction
-                               cleavir-ir:lexical-bind-instruction))))
-           (cleavir-ir:insert-instruction-after initializer instruction)))
+           ((or (rest (cleavir-ir:predecessors successor))
+                ;; This set of instruction types is guaranteed not to
+                ;; call potentially uninitialized closures.
+                (typecase successor
+                  (cleavir-ir:enclose-instruction nil)
+                  ((or cleavir-ir:assignment-instruction
+                       cleavir-ir:lexical-bind-instruction)
+                   (not (typep (first (cleavir-ir:defining-instructions
+                                          (first (cleavir-ir:inputs successor))))
+                               'cleavir-ir:enclose-instruction)))
+                  (t t)))
+            (cleavir-ir:insert-instruction-after initializer instruction)))
       (setf (cleavir-ir:initializer enclose) initializer)
       (setf (gethash initializer instruction-owners)
             (gethash enclose instruction-owners)))
@@ -171,6 +174,7 @@
      (cleavir-ir:make-read-cell-instruction cloc d)
      instruction)
     (cleavir-ir:substitute-input d sloc instruction)
+    #+nil
     (cleavir-hir-transformations:copy-propagate-1 d)))
 
 ;;; Given a single static lexical location SLOC, a dynamic lexical
@@ -198,6 +202,7 @@
         (cleavir-ir:insert-instruction-after
          (cleavir-ir:make-write-cell-instruction cloc d)
          instruction))
+    #+nil
     (cleavir-hir-transformations:copy-propagate-1 d)))
 
 (defun read-only-variable-p (location)
@@ -262,9 +267,11 @@
     ;; and FETCH instructions are inserted immediately after the ENTER
     ;; instruction.
     (ensure-dynamic-location-available function-dag dynamic-locations owner instruction-owners)
+    #+nil
     (cleavir-hir-transformations:copy-propagate-1 (first (cleavir-ir:inputs lexical-bind)))
     ;; Dynamic locations are eligible for copy propagation.
     (dolist (dynamic-location dynamic-locations)
+      #+nil
       (cleavir-hir-transformations:copy-propagate-1 (cdr dynamic-location)))))
 
 (defun process-catch
@@ -293,6 +300,7 @@
     (ensure-dynamic-location-available function-dag dynamic-locations owner instruction-owners)
     ;; Dynamic locations are eligible for copy propagation.
     (dolist (dynamic-location dynamic-locations)
+      #+nil
       (cleavir-hir-transformations:copy-propagate-1 (cdr dynamic-location)))))
 
 (defun process-lexical-variables (initial-instruction)

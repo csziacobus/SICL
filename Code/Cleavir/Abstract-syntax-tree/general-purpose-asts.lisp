@@ -543,6 +543,7 @@
    (%value-ast :initarg :value-ast :reader value-ast)))
 
 (defun make-lexical-binding-ast (lhs-ast value-ast &key origin (policy *policy*))
+  (assert (eq (type-of lhs-ast) 'lexical-ast))
   (change-class lhs-ast 'lexical-variable-ast)
   (make-instance 'lexical-binding-ast
     :origin origin :policy policy
